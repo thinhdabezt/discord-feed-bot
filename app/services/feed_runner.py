@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
 import discord
@@ -9,8 +10,6 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.models import FeedItem, FeedSource
 from app.schemas import FeedItemData
-
-from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -62,20 +61,19 @@ class FeedRunner:
         success: bool,
         error: str | None = None,
     ) -> None:
-        async with self.database.sessions() as session:
-            async with session.begin():
-                item = await session.get(FeedItem, item_id)
+        async with self.database.sessions() as session, session.begin():
+            item = await session.get(FeedItem, item_id)
 
-                if item is None or item.notified_at is not None:
-                    return
+            if item is None or item.notified_at is not None:
+                return
 
-                item.notification_attempts += 1
+            item.notification_attempts += 1
 
-                if success:
-                    item.notified_at = datetime.now(timezone.utc)
-                    item.last_notification_error = None
-                else:
-                    item.last_notification_error = (error or "Unknown error")[:2000]
+            if success:
+                item.notified_at = datetime.now(UTC)
+                item.last_notification_error = None
+            else:
+                item.last_notification_error = (error or "Unknown error")[:2000]
 
     async def _notify(
         self,
@@ -236,13 +234,12 @@ class FeedRunner:
 
                 try:
                     items = await collector.collect(config, self.max_items_per_source)
-                    async with self.database.sessions() as session:
-                        async with session.begin():
-                            source = await self._get_or_create_source(session, config)
-                            new_items = []
-                            for item in items:
-                                if await self._store_item(session, source, item):
-                                    new_items.append(item)
+                    async with self.database.sessions() as session, session.begin():
+                        source = await self._get_or_create_source(session, config)
+                        new_items = []
+                        for item in items:
+                            if await self._store_item(session, source, item):
+                                new_items.append(item)
 
                     total_new += len(new_items)
                     logger.info(

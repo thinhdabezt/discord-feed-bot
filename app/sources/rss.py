@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 
 import feedparser
@@ -18,7 +18,7 @@ def parse_published(entry) -> datetime | None:
         return None
     try:
         dt = parsedate_to_datetime(value)
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
     except (TypeError, ValueError, OverflowError):
         return None
 
