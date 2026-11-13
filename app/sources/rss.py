@@ -52,3 +52,6 @@ class RssCollector(BaseCollector):
                 )
             )
         return items
+
+    async def close(self) -> None:
+        await self.client.aclose()

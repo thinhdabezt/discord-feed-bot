@@ -9,3 +9,6 @@ class BaseCollector(ABC):
     @abstractmethod
     async def collect(self, source: dict, limit: int) -> list[FeedItemData]:
         raise NotImplementedError
+
+    async def close(self) -> None:
+        pass

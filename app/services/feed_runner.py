@@ -16,12 +16,45 @@ logger = logging.getLogger(__name__)
 
 
 class FeedRunner:
-    def __init__(self, database, collectors: dict, interval_seconds: int, max_items_per_source: int):
+    def __init__(
+        self,
+        database,
+        collectors: dict,
+        interval_seconds: int,
+        max_items_per_source: int,
+        sources_file: Path,
+        discord_channel_id: int,
+    ):
         self.database = database
         self.collectors = collectors
         self.interval_seconds = interval_seconds
         self.max_items_per_source = max_items_per_source
+        self.sources_file = sources_file
+        self.discord_channel_id = discord_channel_id
         self._poll_lock = asyncio.Lock()
+
+    async def close(self) -> None:
+        closed_collectors: set[int] = set()
+
+        for collector in self.collectors.values():
+            collector_id = id(collector)
+
+            if collector_id in closed_collectors:
+                continue
+
+            closed_collectors.add(collector_id)
+
+            try:
+                await collector.close()
+                logger.info(
+                    "Collector closed: platform=%s",
+                    getattr(collector, "platform", "unknown"),
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to close collector: platform=%s",
+                    getattr(collector, "platform", "unknown"),
+                )
 
     async def _record_delivery(
         self,
@@ -52,14 +85,10 @@ class FeedRunner:
         url: str,
         summary: str | None,
     ) -> None:
-        from app.config import get_settings
-
-        channel = bot.get_channel(get_settings().discord_channel_id)
+        channel = bot.get_channel(self.discord_channel_id)
 
         if channel is None:
-            channel = await bot.fetch_channel(
-                get_settings().discord_channel_id
-            )
+            channel = await bot.fetch_channel(self.discord_channel_id)
 
         safe_title = discord.utils.escape_markdown(title)
         safe_source = discord.utils.escape_markdown(source_name)
@@ -130,14 +159,29 @@ class FeedRunner:
                     )
 
     def load_sources(self) -> list[dict]:
-        path = Path("sources.yaml")
-        if not path.exists():
-            path = Path("sources.example.yaml")
-        if not path.exists():
-            logger.warning("No sources.yaml found; no feeds will be polled.")
+        path = self.sources_file
+
+        if not path.is_file():
+            logger.error("Sources configuration file not found: %s", path)
             return []
+
         payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        return [s for s in payload.get("sources", []) if s.get("enabled", False)]
+
+        if not isinstance(payload, dict):
+            logger.error("Invalid sources configuration format: %s", path)
+            return []
+
+        sources = payload.get("sources", [])
+
+        if not isinstance(sources, list):
+            logger.error("The 'sources' field must be a list: %s", path)
+            return []
+
+        return [
+            source
+            for source in sources
+            if isinstance(source, dict) and source.get("enabled", False)
+        ]
 
     async def _get_or_create_source(self, session, config: dict) -> FeedSource:
         result = await session.execute(select(FeedSource).where(FeedSource.key == config["key"]))
@@ -212,6 +256,24 @@ class FeedRunner:
 
     async def run_forever(self, bot: discord.Client) -> None:
         await bot.wait_until_ready()
+
+        logger.info(
+            "Feed poller started. Interval: %s seconds",
+            self.interval_seconds,
+        )
+
         while not bot.is_closed():
-            await self.poll_once(bot)
+            try:
+                await self.poll_once(bot)
+
+            except asyncio.CancelledError:
+                logger.info("Feed poller cancellation requested.")
+                raise
+
+            except Exception:
+                logger.exception(
+                    "Unexpected error during polling cycle. "
+                    "The poller will continue."
+                )
+
             await asyncio.sleep(self.interval_seconds)

@@ -27,6 +27,8 @@ class FeedBot(commands.Bot):
             collectors=build_collectors(self.settings),
             interval_seconds=self.settings.poll_interval_seconds,
             max_items_per_source=self.settings.max_items_per_source,
+            sources_file=self.settings.sources_file,
+            discord_channel_id=self.settings.discord_channel_id,
         )
         self.poll_task: asyncio.Task | None = None
 
@@ -48,8 +50,16 @@ class FeedBot(commands.Bot):
                 await self.poll_task
             except asyncio.CancelledError:
                 pass
-        await self.database.close()
-        await super().close()
+            except Exception:
+                logger.exception("Error while stopping feed poller")
+
+        try:
+            await self.runner.close()
+        finally:
+            try:
+                await self.database.close()
+            finally:
+                await super().close()
 
 
 bot = FeedBot()
@@ -63,8 +73,18 @@ async def health(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="poll", description="Trigger a manual feed poll.")
 async def poll_now(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
-    count = await bot.runner.poll_once(bot)
-    await interaction.followup.send(f"Polling finished. {count} new item(s) stored.", ephemeral=True)
+    try:
+        count = await bot.runner.poll_once(bot)
+        await interaction.followup.send(
+            f"Polling finished. {count} new item(s) stored.",
+            ephemeral=True,
+        )
+    except Exception:
+        logger.exception("Manual polling failed")
+        await interaction.followup.send(
+            "Polling failed. Please check the bot logs.",
+            ephemeral=True,
+        )
 
 
 def main() -> None:
