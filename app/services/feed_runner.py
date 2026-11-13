@@ -10,6 +10,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.models import FeedItem, FeedSource
 from app.schemas import FeedItemData
 
+from datetime import datetime, timezone
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,6 +22,112 @@ class FeedRunner:
         self.interval_seconds = interval_seconds
         self.max_items_per_source = max_items_per_source
         self._poll_lock = asyncio.Lock()
+
+    async def _record_delivery(
+        self,
+        item_id: int,
+        success: bool,
+        error: str | None = None,
+    ) -> None:
+        async with self.database.sessions() as session:
+            async with session.begin():
+                item = await session.get(FeedItem, item_id)
+
+                if item is None or item.notified_at is not None:
+                    return
+
+                item.notification_attempts += 1
+
+                if success:
+                    item.notified_at = datetime.now(timezone.utc)
+                    item.last_notification_error = None
+                else:
+                    item.last_notification_error = (error or "Unknown error")[:2000]
+
+    async def _notify(
+        self,
+        bot: discord.Client,
+        source_name: str,
+        title: str,
+        url: str,
+        summary: str | None,
+    ) -> None:
+        from app.config import get_settings
+
+        channel = bot.get_channel(get_settings().discord_channel_id)
+
+        if channel is None:
+            channel = await bot.fetch_channel(
+                get_settings().discord_channel_id
+            )
+
+        safe_title = discord.utils.escape_markdown(title)
+        safe_source = discord.utils.escape_markdown(source_name)
+
+        message = f"**{safe_source}**\n{safe_title}\n{url}"
+
+        if summary:
+            summary = " ".join(summary.split())
+
+            if len(summary) > 500:
+                summary = summary[:497] + "..."
+
+            message += f"\n{summary}"
+
+        await channel.send(message[:1900])
+
+    async def _deliver_pending(self, bot: discord.Client) -> None:
+        async with self.database.sessions() as session:
+            result = await session.execute(
+                select(FeedItem, FeedSource.name)
+                .join(FeedSource, FeedItem.source_id == FeedSource.id)
+                .where(FeedItem.notified_at.is_(None))
+                .order_by(FeedItem.discovered_at.asc())
+                .limit(50)
+            )
+
+            pending = [
+                (
+                    item.id,
+                    source_name,
+                    item.title,
+                    item.url,
+                    item.summary,
+                )
+                for item, source_name in result.all()
+            ]
+
+        for item_id, source_name, title, url, summary in pending:
+            try:
+                await self._notify(
+                    bot,
+                    source_name,
+                    title,
+                    url,
+                    summary,
+                )
+
+                await self._record_delivery(item_id, success=True)
+
+                logger.info("Notification delivered: item_id=%s", item_id)
+
+            except Exception as exc:
+                logger.exception(
+                    "Notification failed: item_id=%s",
+                    item_id,
+                )
+
+                try:
+                    await self._record_delivery(
+                        item_id,
+                        success=False,
+                        error=str(exc),
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to record notification error: item_id=%s",
+                        item_id,
+                    )
 
     def load_sources(self) -> list[dict]:
         path = Path("sources.yaml")
@@ -52,7 +160,6 @@ class FeedRunner:
         return source
 
     async def _store_item(self, session, source: FeedSource, item: FeedItemData) -> bool:
-        # PostgreSQL-native upsert prevents duplicate notifications under concurrent polls.
         statement = (
             pg_insert(FeedItem)
             .values(
@@ -94,35 +201,14 @@ class FeedRunner:
                                     new_items.append(item)
 
                     total_new += len(new_items)
-                    for item in new_items:
-                        await self._notify(bot, config["name"], item)
                     logger.info(
                         "source=%s fetched=%d new=%d",
                         config["key"], len(items), len(new_items)
                     )
                 except Exception:
                     logger.exception("Collector failed for source=%s", config.get("key"))
+            await self._deliver_pending(bot)
             return total_new
-
-    async def _notify(self, bot: discord.Client, source_name: str, item: FeedItemData) -> None:
-        from app.config import get_settings
-
-        channel = bot.get_channel(get_settings().discord_channel_id)
-        if channel is None:
-            try:
-                channel = await bot.fetch_channel(get_settings().discord_channel_id)
-            except discord.DiscordException:
-                logger.exception("Unable to access notification channel.")
-                return
-
-        title = discord.utils.escape_markdown(item.title)
-        message = f"**{discord.utils.escape_markdown(source_name)}**\n{title}\n{item.url}"
-        if item.summary:
-            summary = " ".join(item.summary.split())
-            if len(summary) > 500:
-                summary = summary[:497] + "..."
-            message += f"\n{summary}"
-        await channel.send(message[:1900])
 
     async def run_forever(self, bot: discord.Client) -> None:
         await bot.wait_until_ready()
