@@ -1,0 +1,9 @@
+# RSS is the first supported collector in Phase 1.
+sources:
+  - key: hacker-news
+    name: Hacker News
+    platform: rss
+    url: https://news.ycombinator.com/rss
+    enabled: true
+# Later phases add official API connectors for X, Instagram and Facebook.
+# Do not place access tokens or cookies in this file.
