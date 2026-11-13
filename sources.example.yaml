@@ -1,0 +1,11 @@
+# Only add public feeds you are permitted to monitor.
+# RSS is the first supported collector in Phase 1.
+sources:
+  - key: example-news
+    name: Example News
+    platform: rss
+    url: https://example.com/feed.xml
+    enabled: false
+
+# Later phases add official API connectors for X, Instagram and Facebook.
+# Do not place access tokens or cookies in this file.
